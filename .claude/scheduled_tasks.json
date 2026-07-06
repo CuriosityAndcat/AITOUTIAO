@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    {
+      "id": "893aa1eb",
+      "cron": "7 14 * * *",
+      "prompt": "cd D:/AIToutiao/knowledge-brain/scripts && python runner.py --full",
+      "createdAt": 1782827931815,
+      "lastFiredAt": 1782973672951,
+      "recurring": true,
+      "createdBySessionId": "0fc0c1e8-de38-484f-941f-5f7662624ffa",
+      "createdByPid": 16644
+    }
+  ]
+}

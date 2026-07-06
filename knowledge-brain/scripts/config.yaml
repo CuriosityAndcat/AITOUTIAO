@@ -1,0 +1,20 @@
+version: '1.0'
+vault_path: D:/AIToutiao/knowledge-brain
+claude_project_path: C:/Users/LHQ/.claude/projects/D--AIToutiao
+claude_md_path: D:/AIToutiao/CLAUDE.md
+python_path: C:/Users/LHQ/AppData/Local/Programs/Python/Python312/python.exe
+api:
+  settings_json: C:/Users/LHQ/.claude/settings.json
+  base_url: null
+  model: null
+  temperature: 0.3
+  max_tokens: 2000
+  max_retries: 3
+  retry_backoff_sec: [2, 4, 8]
+log_level: INFO
+log_dir: D:/AIToutiao/knowledge-brain/04-Feedback/_logs
+scan:
+  day: SUN
+  hour: 15
+  minute: 0
+topic_map: {}

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>今日头条自动发布工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap');
+        * { font-family: 'Noto Sans SC', sans-serif; }
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
+        .glass { background: rgba(255,255,255,0.95); backdrop-filter: blur(10px); }
+        .btn-primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+        .btn-success { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+        .pulse-dot { animation: pulse 2s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .step-active { border-color: #667eea; color: #667eea; }
+        .step-done { border-color: #38ef7d; color: #38ef7d; }
+        textarea:focus, input:focus, select:focus { outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102,126,234,0.1); }
+        .loading { pointer-events: none; opacity: 0.7; }
+    </style>
+</head>
+<body class="flex items-center justify-center p-4">
+    <div class="w-full max-w-4xl glass rounded-2xl shadow-2xl overflow-hidden mt-8 mb-8">
+        <!-- 顶部导航 -->
+        <div class="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-6 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center text-2xl">📰</div>
+                <div>
+                    <h1 class="text-xl font-bold">今日头条自动发布工具</h1>
+                    <p class="text-xs text-white/70">AI 写作 · 一键发布</p>
+                </div>
+            </div>
+            <div class="flex items-center space-x-3">
+                <div id="loginStatus" class="flex items-center space-x-2 bg-white/20 px-3 py-1.5 rounded-full text-sm">
+                    <span class="w-2 h-2 rounded-full bg-gray-300 pulse-dot"></span>
+                    <span>检测中...</span>
+                </div>
+                <button id="btnLogin" onclick="triggerLogin()" class="text-xs bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-full transition">
+                    重新登录
+                </button>
+            </div>
+        </div>
+
+        <!-- 步骤指示器 -->
+        <div class="px-8 pt-6 pb-2 flex items-center justify-center space-x-4 text-sm">
+            <div id="step1" class="step-active flex items-center space-x-2 border-b-2 pb-2">
+                <span class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold">1</span>
+                <span>输入主题</span>
+            </div>
+            <div class="text-gray-300">—</div>
+            <div id="step2" class="flex items-center space-x-2 border-b-2 border-transparent pb-2 text-gray-400">
+                <span class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold">2</span>
+                <span>AI 生成</span>
+            </div>
+            <div class="text-gray-300">—</div>
+            <div id="step3" class="flex items-center space-x-2 border-b-2 border-transparent pb-2 text-gray-400">
+                <span class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold">3</span>
+                <span>预览编辑</span>
+            </div>
+            <div class="text-gray-300">—</div>
+            <div id="step4" class="flex items-center space-x-2 border-b-2 border-transparent pb-2 text-gray-400">
+                <span class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-bold">4</span>
+                <span>一键发布</span>
+            </div>
+        </div>
+
+        <!-- 主内容区 -->
+        <div class="p-8 space-y-6">
+
+            <!-- 区块一：内容类型 + 主题输入 -->
+            <div id="panel1">
+                <div class="flex items-center space-x-4 mb-4">
+                    <span class="text-sm font-medium text-gray-700">内容类型：</span>
+                    <div class="flex bg-gray-100 rounded-lg p-1">
+                        <button id="btnToutie" onclick="setContentType('toutie')" class="px-4 py-2 rounded-md text-sm font-medium transition">微头条</button>
+                        <button id="btnArticle" onclick="setContentType('article')" class="px-4 py-2 rounded-md text-sm font-medium transition bg-white shadow-sm text-indigo-600">文章</button>
+                    </div>
+                    <div class="ml-auto text-xs text-gray-400" id="charHint">文章模式 · 建议 1000-5000 字</div>
+                </div>
+
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">主题 / 关键词</label>
+                    <textarea id="topicInput" rows="3" placeholder="输入文章主题或关键词，例如：AI大模型最新发展趋势" class="w-full px-4 py-3 border border-gray-200 rounded-xl resize-none focus:ring-2 focus:ring-indigo-200 transition"></textarea>
+                </div>
+
+                <!-- 高级选项（可折叠） -->
+                <details class="mb-4">
+                    <summary class="cursor-pointer text-sm text-gray-500 hover:text-indigo-600 transition">高级选项</summary>
+                    <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-gray-50 rounded-xl">
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">语调风格</label>
+                            <select id="toneSelect" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm">
+                                <option value="专业且易懂">专业且易懂</option>
+                                <option value="轻松幽默">轻松幽默</option>
+                                <option value="深度分析">深度分析</option>
+                                <option value="通俗易懂">通俗易懂</option>
+                                <option value="犀利点评">犀利点评</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-500 mb-1">最大字数</label>
+                            <input id="maxCharsInput" type="number" value="5000" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm" />
+                        </div>
+                    </div>
+                </details>
+
+                <button onclick="generateContent()" id="btnGenerate" class="btn-primary text-white px-8 py-3 rounded-xl font-medium shadow-lg hover:shadow-xl transition flex items-center space-x-2 mx-auto">
+                    <span>✨</span>
+                    <span>AI 生成内容</span>
+                </button>
+            </div>
+
+            <!-- 区块二：生成结果预览（初始隐藏） -->
+            <div id="panel2" class="hidden space-y-4">
+                <div class="flex items-center justify-between">
+                    <h3 class="font-semibold text-gray-800">生成结果</h3>
+                    <div class="text-xs text-gray-400" id="charCount">0 字</div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">标题</label>
+                    <input id="titleInput" type="text" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-200 transition" placeholder="文章标题（2-30字）" maxlength="30" />
+                    <div class="text-right text-xs text-gray-400 mt-1" id="titleCharCount">0/30</div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">正文内容 <span class="text-xs text-gray-400">(可编辑)</span></label>
+                    <textarea id="contentInput" rows="12" class="w-full px-4 py-3 border border-gray-200 rounded-xl resize-y focus:ring-2 focus:ring-indigo-200 transition text-sm leading-relaxed"></textarea>
+                </div>
+
+                <div class="flex items-center space-x-3 justify-center">
+                    <button onclick="goBack()" class="px-6 py-2.5 border border-gray-300 rounded-xl text-sm hover:bg-gray-50 transition">← 返回修改主题</button>
+                    <button onclick="goToPublish()" class="btn-success text-white px-8 py-2.5 rounded-xl font-medium shadow hover:shadow-lg transition flex items-center space-x-2">
+                        <span>下一步：发布设置</span>
+                        <span>→</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 区块三：发布设置（初始隐藏） -->
+            <div id="panel3" class="hidden space-y-4">
+                <h3 class="font-semibold text-gray-800">发布设置</h3>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">封面图片（可选）</label>
+                    <div class="flex items-center space-x-4">
+                        <div id="coverDropZone" class="w-48 h-32 border-2 border-dashed border-gray-300 rounded-xl flex flex-col items-center justify-center cursor-pointer hover:border-indigo-400 transition relative overflow-hidden">
+                            <span class="text-3xl text-gray-300">🖼️</span>
+                            <span class="text-xs text-gray-400 mt-1">点击或拖拽上传</span>
+                            <input id="coverInput" type="file" accept="image/*" class="absolute inset-0 opacity-0 cursor-pointer" onchange="handleCoverUpload(event)" />
+                        </div>
+                        <div id="coverPreview" class="hidden w-48 h-32 rounded-xl overflow-hidden border border-gray-200">
+                            <img id="coverImg" src="" alt="封面预览" class="w-full h-full object-cover" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex items-center space-x-2">
+                    <input id="autoPublishCheck" type="checkbox" checked class="w-4 h-4 text-indigo-600 rounded" />
+                    <label for="autoPublishCheck" class="text-sm text-gray-700">自动发布（取消则仅填写内容，需手动点击发布）</label>
+                </div>
+
+                <div class="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-sm text-yellow-800">
+                    ⚠️ 发布时浏览器会自动打开并操作今日头条后台。请确保已登录，且发布过程中不要操作该浏览器窗口。
+                </div>
+
+                <div class="flex items-center space-x-3 justify-center">
+                    <button onclick="goBackToEdit()" class="px-6 py-2.5 border border-gray-300 rounded-xl text-sm hover:bg-gray-50 transition">← 返回编辑内容</button>
+                    <button onclick="startPublish()" id="btnPublish" class="btn-primary text-white px-8 py-3 rounded-xl font-medium shadow-lg hover:shadow-xl transition flex items-center space-x-2">
+                        <span>🚀</span>
+                        <span>开始发布</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 区块四：发布进度（初始隐藏） -->
+            <div id="panel4" class="hidden space-y-4">
+                <h3 class="font-semibold text-gray-800">发布进度</h3>
+
+                <!-- 进度条 -->
+                <div class="space-y-2">
+                    <div class="flex justify-between text-xs text-gray-500">
+                        <span id="progressText">准备中...</span>
+                        <span id="progressPercent">0%</span>
+                    </div>
+                    <div class="w-full bg-gray-200 rounded-full h-2.5">
+                        <div id="progressBar" class="bg-gradient-to-r from-indigo-500 to-purple-500 h-2.5 rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- 操作日志 -->
+                <div>
+                    <label class="block text-xs text-gray-500 mb-1">操作日志</label>
+                    <div id="logArea" class="bg-gray-900 text-green-400 rounded-xl p-4 h-48 overflow-y-auto text-xs font-mono leading-relaxed"></div>
+                </div>
+
+                <!-- 结果 -->
+                <div id="publishResult" class="hidden p-4 rounded-xl text-center text-sm font-medium"></div>
+
+                <div class="flex justify-center">
+                    <button onclick="resetAll()" class="px-6 py-2.5 border border-gray-300 rounded-xl text-sm hover:bg-gray-50 transition">🔄 新建任务</button>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- 底部历史任务 -->
+        <div class="px-8 pb-6">
+            <details>
+                <summary class="cursor-pointer text-sm text-gray-400 hover:text-indigo-600 transition">查看历史任务</summary>
+                <div id="taskHistory" class="mt-3 space-y-2 max-h-40 overflow-y-auto"></div>
+            </details>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
