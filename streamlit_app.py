@@ -545,7 +545,7 @@ def step_download(state: PipelineState) -> bool:
     import sys as _sys
     _sys.stderr.write("[download] step_download 开始\n"); _sys.stderr.flush()
     set_stage("下载", "running")
-    add_log(f"阶段1/6: 视频下载 - {state.input_url[:60]}...", "stage")
+    add_log(f"阶段1/5: 视频下载 - {state.input_url[:60]}...", "stage")
 
     temp_dir = state.run_dir / ".temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -616,7 +616,7 @@ def step_transcribe(state: PipelineState) -> bool:
     import sys as _sys
     _sys.stderr.write("[transcribe] step_transcribe 开始\n"); _sys.stderr.flush()
     set_stage("转录", "running")
-    add_log("阶段2/6: 语音转录", "stage")
+    add_log("阶段2/5: 语音转录", "stage")
 
     # 查找视频文件
     video_files = state.outputs.get("video_files", [])
@@ -960,6 +960,559 @@ def step_humanize(state: PipelineState) -> bool:
 
 
 # ============================================================
+# 🔍 Web 搜索研究模块
+# ============================================================
+
+SEARCH_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+MAX_RESEARCH_ITERATIONS = 3       # 最大研究-重写轮数
+QUALITY_PASS_THRESHOLD = 75        # 质量评分通过线（0-100）
+
+
+def _search_web(query: str, max_results: int = 5) -> str:
+    """使用 DuckDuckGo 搜索，返回聚合的搜索结果摘要（纯文本）。
+
+    优先使用 duckduckgo_search 库；不可用时回退到 HTTP 请求。
+    """
+    import sys as _sys
+
+    # ── 方案一: ddgs 库（新版） ──
+    try:
+        from ddgs import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                body = r.get("body", "")
+                if body:
+                    results.append(f"- {body[:300]}")
+        if results:
+            _sys.stderr.write(f"[research] ddgs 返回 {len(results)} 条结果\n"); _sys.stderr.flush()
+            return "\n".join(results)
+    except ImportError:
+        _sys.stderr.write("[research] ddgs 未安装，尝试 duckduckgo_search\n"); _sys.stderr.flush()
+    except Exception as e:
+        _sys.stderr.write(f"[research] ddgs 异常: {e}，回退\n"); _sys.stderr.flush()
+
+    # ── 方案二: duckduckgo_search 库 ──
+    try:
+        from duckduckgo_search import DDGS
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                body = r.get("body", "")
+                if body:
+                    results.append(f"- {body[:300]}")
+        if results:
+            _sys.stderr.write(f"[research] duckduckgo_search 返回 {len(results)} 条结果\n"); _sys.stderr.flush()
+            return "\n".join(results)
+    except ImportError:
+        _sys.stderr.write("[research] duckduckgo_search 未安装，回退到 HTTP 方式\n"); _sys.stderr.flush()
+    except Exception as e:
+        _sys.stderr.write(f"[research] duckduckgo_search 异常: {e}，回退\n"); _sys.stderr.flush()
+
+    # ── 方案二: 直接 HTTP 请求 DuckDuckGo Lite ──
+    try:
+        import urllib.parse
+        import urllib.request
+        import re as _re
+
+        url = f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers={"User-Agent": SEARCH_USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+
+        # 提取结果摘要（lite 版本用 <td> 展示片段）
+        snippets = _re.findall(
+            r'<a[^>]*class="result-link"[^>]*>.*?</a>.*?<td[^>]*class="result-snippet"[^>]*>(.*?)</td>',
+            html, _re.DOTALL | _re.IGNORECASE,
+        )
+        if not snippets:
+            # 备选：匹配任意 <td> 中的长文本片段
+            snippets = _re.findall(r'<td[^>]*>(.{80,}?)</td>', html, _re.DOTALL)
+
+        results = []
+        for s in snippets[:max_results]:
+            clean = _re.sub(r'<[^>]+>', '', s).strip()
+            if clean and len(clean) > 20:
+                results.append(f"- {clean[:300]}")
+
+        _sys.stderr.write(f"[research] HTTP 搜索返回 {len(results)} 条结果\n"); _sys.stderr.flush()
+        return "\n".join(results) if results else ""
+
+    except Exception as e:
+        _sys.stderr.write(f"[research] HTTP 搜索失败: {e}\n"); _sys.stderr.flush()
+        return ""
+
+
+def _extract_key_topics(state: PipelineState) -> str:
+    """从视频标题和转录文本中提取核心关键词/搜索查询词。"""
+    title = state.outputs.get("video_title", "")
+    transcript = state.outputs.get("transcript_text", "")
+
+    # 组合可用文本
+    source = title[:200] if title else ""
+    if transcript:
+        source += "\n" + transcript[:500]
+
+    if not source.strip():
+        return ""
+
+    # 用 DeepSeek 提炼搜索关键词
+    try:
+        from ai_writer import AIWriter
+        writer = AIWriter()
+        prompt = (
+            f"从以下视频内容中提取 1-3 个最核心的搜索关键词（中文），"
+            f"用于在网络上查找相关背景资料。直接返回关键词，用逗号分隔，不要其他文字。\n\n"
+            f"{source[:600]}"
+        )
+        keywords = writer._call_ai(prompt, max_tokens=60, temperature=0.3)
+        return keywords.strip().strip("。，,.;;\"'")
+    except Exception:
+        pass
+
+    # 回退：直接用标题作为搜索词
+    if title:
+        return title[:100]
+    return source[:100]
+
+
+def _build_research_context(state: PipelineState) -> str:
+    """执行网页搜索，构建写作参考文献。返回聚合的研究上下文。"""
+    import sys as _sys
+
+    keywords = _extract_key_topics(state)
+    if not keywords:
+        _sys.stderr.write("[research] 无关键词，跳过搜索\n"); _sys.stderr.flush()
+        return ""
+
+    add_log(f"🔍 搜索关键词: {keywords}", "info")
+    _sys.stderr.write(f"[research] 开始搜索: {keywords}\n"); _sys.stderr.flush()
+
+    # 拆分多关键词分别搜索
+    queries = [q.strip() for q in keywords.replace("，", ",").split(",") if q.strip()][:3]
+    if not queries:
+        queries = [keywords]
+
+    all_results = []
+    for q in queries:
+        result = _search_web(q, max_results=3)
+        if result:
+            all_results.append(f"### 搜索「{q}」结果:\n{result}")
+        _sys.stderr.write(f"[research] 查询 '{q[:30]}...' → {len(result)} 字符\n"); _sys.stderr.flush()
+
+    context = "\n\n".join(all_results)
+    if context:
+        add_log(f"📚 搜集到 {len(all_results)} 组背景资料 ({len(context)} 字符)", "success")
+    else:
+        add_log("⚠️ 未搜集到有效网络资料，将仅基于视频文本生成", "warning")
+
+    st.session_state.progress_pct = 0.34
+    return context
+
+
+# ============================================================
+# 📊 内容质量评估模块
+# ============================================================
+
+def _evaluate_content(content: str, title: str, style: str,
+                      research_context: str = "") -> dict:
+    """使用 DeepSeek API 评估生成内容的质量。
+
+    返回: {"score": int(0-100), "feedback": str, "passed": bool}
+    """
+    import sys as _sys
+    _sys.stderr.write("[eval] 开始评估内容质量...\n"); _sys.stderr.flush()
+
+    eval_prompt = (
+        "你是一个严格的内容质量评审员。请评估以下微头条/文章内容的质量，"
+        "从以下维度评分（每项满分100）：\n\n"
+        "1. **事实准确性**：是否与已知事实一致，无明显编造内容\n"
+        "2. **信息完整性**：是否覆盖了关键信息点（人物、事件、原因、影响）\n"
+        "3. **结构清晰度**：段落分明、逻辑连贯、易读性强\n"
+        "4. **风格一致性**：是否符合指定写作风格的要求\n"
+        "5. **去AI味程度**：读起来是否像真人写作，有无机器腔\n\n"
+        "评分规则：\n"
+        "- 综合分 = 5 项平均分\n"
+        f"- 综合分 >= {QUALITY_PASS_THRESHOLD} 且无单项低于 50 → 通过\n"
+        "- 否则 → 不通过，需重写\n\n"
+        f"目标写作风格：{style}\n\n"
+    )
+
+    if research_context:
+        eval_prompt += (
+            "【参考背景资料】（用于校验事实准确性）\n"
+            f"{research_context[:800]}\n\n"
+        )
+
+    eval_prompt += (
+        f"【标题】\n{title}\n\n"
+        f"【正文】（共 {len(content)} 字）\n{content[:2000]}\n\n"
+        "请返回 JSON 格式（不要其他文字）：\n"
+        '{"综合分": 整数, "事实准确": 整数, "信息完整": 整数, '
+        '"结构清晰": 整数, "风格一致": 整数, "去AI味": 整数, '
+        '"反馈": "一句话总结优劣和改进建议", "通过": true/false}'
+    )
+
+    try:
+        from ai_writer import AIWriter
+        import json as _json
+        import re as _re
+
+        writer = AIWriter()
+        response = writer._call_ai(eval_prompt, max_tokens=400, temperature=0.1)
+
+        # 尝试解析 JSON
+        json_match = _re.search(r'\{[^}]+\}', response, _re.DOTALL)
+        if json_match:
+            result = _json.loads(json_match.group())
+            score = int(result.get("综合分", 50))
+            feedback = result.get("反馈", "无评价")
+            passed = result.get("通过", score >= QUALITY_PASS_THRESHOLD)
+        else:
+            # 解析失败，用规则判断
+            score = 50
+            feedback = f"评估解析失败，原始响应: {response[:100]}"
+            passed = len(content) > 100  # 至少不是空内容
+
+        _sys.stderr.write(
+            f"[eval] 评分={score}, 通过={passed}, "
+            f"事实准确={result.get('事实准确', '?') if json_match else '?'}\n"
+        ); _sys.stderr.flush()
+
+        return {"score": score, "feedback": feedback, "passed": passed}
+
+    except Exception as e:
+        _sys.stderr.write(f"[eval] 评估异常: {e}\n"); _sys.stderr.flush()
+        # 评估失败时不阻塞流程，默认通过
+        return {"score": QUALITY_PASS_THRESHOLD, "feedback": f"评估模块异常，跳过评估: {e}", "passed": True}
+
+
+# ============================================================
+# 🔄 研究-生成-评估-迭代 主循环
+# ============================================================
+
+def _research_and_write(state: PipelineState) -> bool:
+    """研究驱动的写作循环：搜索背景 → 生成 → 评估 → 迭代重写。
+
+    替换原有的 step_write + step_humanize 独立调用，
+    将两个阶段合并为一个智能迭代流程。
+    最大迭代次数由 MAX_RESEARCH_ITERATIONS 控制。
+    """
+    import sys as _sys
+
+    _sys.stderr.write("[loop] ==== 研究-写作循环开始 ====\n"); _sys.stderr.flush()
+
+    transcript = state.outputs.get("transcript_text", "")
+    if not transcript:
+        desc = state.outputs.get("video_description", "")
+        title = state.outputs.get("video_title", "")
+        transcript = f"标题：{title}\n\n{desc}" if (title or desc) else ""
+        if not transcript:
+            add_log("没有转录文本，无法生成内容", "error")
+            set_stage("研究写作", "failed")
+            return False
+
+    _sys.stderr.write(f"[loop] 输入文本: {len(transcript)} 字符\n"); _sys.stderr.flush()
+
+    # ── 0. 执行前研究：提取关键词并搜索 ──
+    set_stage("研究写作", "running")
+    add_log("阶段3/5: 网络研究 + AI 写作（含质量评估迭代）", "stage")
+
+    research_context = _build_research_context(state)
+    all_research_notes = [research_context] if research_context else []
+
+    # 构建增强后的写作主题
+    base_topic = transcript[:2000]
+    enhanced_topic = base_topic
+    if research_context:
+        enhanced_topic = (
+            f"【视频原文摘要】\n{base_topic}\n\n"
+            f"【网络背景资料（供事实参考）】\n{research_context[:1500]}"
+        )
+
+    add_log(f"输入文本: {len(transcript)} 字符", "info")
+    add_log(f"风格: {state.content_style}", "info")
+    st.session_state.progress_pct = 0.35
+
+    best_content = ""
+    best_title = ""
+    best_score = 0
+    best_iteration = 0
+    eval_records = []
+
+    # ── 迭代循环 ──
+    for iteration in range(1, MAX_RESEARCH_ITERATIONS + 1):
+        _sys.stderr.write(f"[loop] 第 {iteration}/{MAX_RESEARCH_ITERATIONS} 轮\n"); _sys.stderr.flush()
+
+        if iteration == 1:
+            topic = enhanced_topic
+            add_log(f"📝 第 1 轮：使用网络研究资料生成初稿", "info")
+        else:
+            # 后续轮次：根据评估反馈，重新搜索并补充资料
+            add_log(f"🔄 第 {iteration} 轮：根据评估反馈重新搜索...", "info")
+
+            # 根据上次评估反馈调整搜索关键词
+            last_feedback = eval_records[-1].get("feedback", "") if eval_records else ""
+            refine_query = _extract_refined_query(best_content, last_feedback, state)
+            if refine_query:
+                add_log(f"🔍 精炼搜索: {refine_query[:60]}...", "info")
+                new_context = _search_web(refine_query, max_results=5)
+                if new_context:
+                    all_research_notes.append(new_context)
+                    add_log(f"📚 补充 {len(new_context)} 字符背景资料", "info")
+
+            # 重新构建增强主题
+            cumulative_context = "\n\n---\n\n".join(all_research_notes[-2:])  # 最近2轮研究
+            topic = (
+                f"【视频原文摘要】\n{transcript[:2000]}\n\n"
+                f"【网络背景资料（累计研究）】\n{cumulative_context[:2000]}\n\n"
+                f"【上一轮问题需改进】\n{last_feedback}"
+            )
+
+        # ── 1. 调用 AI 写作 ──
+        try:
+            from ai_writer import AIWriter
+            from models import ContentType as _CT, ContentStyle as _CS
+
+            writer = AIWriter()
+            cs = state.content_style
+            if _CS and isinstance(cs, str):
+                try:
+                    cs = _CS(cs)
+                except ValueError:
+                    cs = _CS.GENERAL
+
+            if _CT is not None:
+                if state.content_type == "article":
+                    ct = _CT.ARTICLE
+                else:
+                    ct = _CT.TOUTIE
+                result = writer.generate(
+                    topic=topic,
+                    content_type=ct,
+                    content_style=cs if state.content_type == "toutie" else None,
+                    max_chars=2000 if state.content_type == "article" else 1200,
+                )
+            else:
+                if state.content_type == "article":
+                    result = writer.generate(
+                        topic=topic, content_type="article", max_chars=2000,
+                    )
+                else:
+                    result = writer.generate(
+                        topic=topic, content_type="toutie",
+                        content_style=cs, max_chars=1200,
+                    )
+        except Exception as e:
+            add_log(f"AI 写作异常（第{iteration}轮）: {e}", "error")
+            traceback.print_exc()
+            if iteration == MAX_RESEARCH_ITERATIONS:
+                set_stage("研究写作", "failed")
+                return False
+            continue
+
+        title = result.get("title", "")
+        content = result.get("content", "")
+        char_count = result.get("char_count", len(content))
+
+        if not content or len(content) < 50:
+            add_log(f"第{iteration}轮内容过短，跳过", "warning")
+            eval_records.append({"feedback": "内容过短，需扩充"})
+            continue
+
+        # ── 2. 如果需要人工化，先不改写，先评估原始质量 ──
+        _sys.stderr.write(f"[loop] 第{iteration}轮: {char_count} 字符\n"); _sys.stderr.flush()
+
+        # ── 3. 质量评估 ──
+        add_log(f"📊 第{iteration}轮质量评估中...", "info")
+        style_label = _get_style_label(state.content_style)
+        eval_result = _evaluate_content(content, title, style_label, research_context)
+        eval_records.append(eval_result)
+
+        score = eval_result["score"]
+        feedback = eval_result["feedback"]
+        passed = eval_result["passed"]
+
+        add_log(
+            f"第{iteration}轮评估: 综合分={score}/100 | {'✅ 通过' if passed else '❌ 需改进'}",
+            "success" if passed else "warning",
+        )
+        if feedback:
+            add_log(f"评估反馈: {feedback[:100]}", "info")
+
+        # 记录最佳结果
+        if score > best_score:
+            best_score = score
+            best_content = content
+            best_title = title
+            best_iteration = iteration
+
+        # 检查是否达标
+        if passed:
+            _sys.stderr.write(f"[loop] 第{iteration}轮通过，停止迭代\n"); _sys.stderr.flush()
+            break
+        else:
+            if iteration < MAX_RESEARCH_ITERATIONS:
+                add_log(f"准备第{iteration + 1}轮重写...", "info")
+                st.session_state.progress_pct = 0.35 + iteration * 0.03
+
+    # ── 4. 使用最佳结果 ──
+    if not best_content:
+        add_log("所有轮次均未生成有效内容", "error")
+        set_stage("研究写作", "failed")
+        return False
+
+    content = best_content
+    title = best_title
+
+    add_log(
+        f"✅ 研究-写作完成: 第{best_iteration}轮最佳, 评分={best_score}/100, "
+        f"共{len(all_research_notes)}组网络资料",
+        "success",
+    )
+
+    # 保存 AI 原始版本
+    prefix = "微头条" if state.content_type == "toutie" else "文章"
+    raw_file = state.run_dir / f"{prefix}_{state.run_id}_ai_raw.md"
+    research_log = state.run_dir / f"{prefix}_{state.run_id}_research.md"
+    raw_file.write_text(
+        f"# {title}\n\n{content}\n\n---\n"
+        f"*AI 原始生成 | 第{best_iteration}轮 | 评分{best_score} | {datetime.now().isoformat()}*",
+        encoding="utf-8",
+    )
+
+    # 保存研究笔记
+    research_notes_content = "\n\n---\n\n".join(
+        f"## 第{i+1}次研究\n{r}" for i, r in enumerate(all_research_notes) if r
+    )
+    if research_notes_content:
+        research_log.write_text(
+            f"# 研究笔记\n\n{research_notes_content}\n\n---\n"
+            f"| 迭代 | 评分 | 反馈 |\n|------|------|------|\n" +
+            "\n".join(
+                f"| 第{i+1}轮 | {r.get('score', '?')} | {r.get('feedback', '')[:50]} |"
+                for i, r in enumerate(eval_records)
+            ),
+            encoding="utf-8",
+        )
+
+    state.outputs["generated_title"] = title
+    state.outputs["generated_content"] = content
+    state.outputs["generated_file"] = str(raw_file)
+    state.outputs["char_count"] = len(content)
+    state.outputs["research_notes"] = all_research_notes
+    state.outputs["eval_records"] = [
+        {"iteration": i + 1, "score": r["score"], "feedback": r.get("feedback", "")}
+        for i, r in enumerate(eval_records)
+    ]
+    state.outputs["best_iteration"] = best_iteration
+    state.outputs["best_score"] = best_score
+
+    state.mark_done("write")
+    st.session_state.progress_pct = 0.45
+
+    # ── 5. 人工化改写（如果启用，内嵌于研究写作阶段） ──
+    if state.enable_humanize:
+        add_log("→ 人工化改写（去 AI 味）...", "stage")
+        st.session_state.progress_pct = 0.48
+
+        try:
+            from ai_writer import AIWriter
+            writer = AIWriter()
+            result = writer.humanize(content)
+            humanized = result["content"]
+            h_char_count = result["char_count"]
+
+            # 对人工化结果也做一次轻量评估（仅检查是否有严重退化）
+            h_eval = _evaluate_content(humanized, title, _get_style_label(state.content_style))
+            if h_eval["score"] < best_score - 20:
+                add_log(
+                    f"人工化后质量下降（{best_score}→{h_eval['score']}），保留最佳版本",
+                    "warning",
+                )
+            else:
+                content = humanized
+                add_log(f"人工化改写完成 ({h_char_count} 字符)", "success")
+
+            # 保存人工化版本
+            output_file = state.run_dir / f"{prefix}_{state.run_id}.md"
+            output_file.write_text(
+                f"# {title}\n\n{content}\n\n---\n"
+                f"*第{best_iteration}轮 | 评分{best_score} | 人工化改写 | {datetime.now().isoformat()}*",
+                encoding="utf-8",
+            )
+
+            state.outputs["humanized_content"] = content
+            state.outputs["generated_content"] = content
+            state.outputs["generated_file"] = str(output_file)
+            state.outputs["humanized_file"] = str(output_file)
+            state.outputs["char_count"] = len(content)
+
+        except Exception as e:
+            add_log(f"人工化改写失败（保留 AI 原文）: {e}", "warning")
+
+        state.mark_done("humanize")
+        st.session_state.progress_pct = 0.55
+    else:
+        add_log("跳过人工化改写（未启用）", "info")
+        state.mark_done("humanize")
+
+    # ── 6. 输出最终报告 ──
+    add_log(
+        f"🏁 研究-写作循环完成 | 最佳轮次: 第{best_iteration}轮 | "
+        f"评分: {best_score}/100 | 网络资料: {len(all_research_notes)}组",
+        "success",
+    )
+
+    _sys.stderr.write(
+        f"[loop] ==== 循环结束 ==== best_round={best_iteration} "
+        f"score={best_score} research_groups={len(all_research_notes)}\n"
+    ); _sys.stderr.flush()
+
+    return True
+
+
+def _extract_refined_query(content: str, feedback: str, state: PipelineState) -> str:
+    """根据上一轮评估反馈，生成精炼搜索关键词。"""
+    if not feedback:
+        return ""
+
+    try:
+        from ai_writer import AIWriter
+        writer = AIWriter()
+        prompt = (
+            f"根据以下评估反馈和当前内容，提炼一个用于补充搜索的关键词短语（中文，10字以内）。"
+            f"直接返回关键词，不要其他文字。\n\n"
+            f"评价反馈: {feedback[:200]}\n"
+            f"当前内容摘要: {content[:300]}"
+        )
+        return writer._call_ai(prompt, max_tokens=40, temperature=0.3).strip().strip("。，,.;;\"'")
+    except Exception:
+        pass
+    return ""
+
+
+def _get_style_label(style_value: str) -> str:
+    """将 style 标识符转为中文标签。"""
+    mapping = {
+        "story_narrative": "评书故事型",
+        "military": "军事深度分析型",
+        "sharp_commentary": "冷静克制型",
+        "data_list": "硬核论证型",
+        "flash_news": "快讯速报型",
+        "discussion": "互动讨论型",
+        "general": "通用风格",
+    }
+    # 处理 ContentStyle.story_narrative 等形式
+    key = style_value.split(".")[-1] if "." in style_value else style_value
+    return mapping.get(key, style_value)
+
+
+# ============================================================
 # Pollinations 免费图片 API 辅助函数
 # ============================================================
 
@@ -1052,7 +1605,7 @@ def step_images(state: PipelineState) -> bool:
     # 未启用配图
     if not state.with_images:
         _sys.stderr.write("[images] 配图未启用，跳过\n"); _sys.stderr.flush()
-        add_log("跳过阶段5: 配图生成（未启用）", "info")
+        add_log("跳过阶段4: 配图生成（未启用）", "info")
         set_stage("配图", "done")
         state.mark_done("generate_images")
         state.outputs["images_injected"] = False
@@ -1061,7 +1614,7 @@ def step_images(state: PipelineState) -> bool:
 
     _sys.stderr.write("[images] step_images 开始（Pollinations）\n"); _sys.stderr.flush()
     set_stage("配图", "running")
-    add_log("阶段5/6: AI 配图生成（Pollinations 免费 API）", "stage")
+    add_log("阶段4/5: AI 配图生成（Pollinations 免费 API）", "stage")
 
     title = state.outputs.get("generated_title", "")
     content = state.outputs.get("generated_content", "")
@@ -1238,7 +1791,7 @@ def _inject_images_v2(state, cover_path, inline_paths: list) -> bool:
 def step_assemble(state: PipelineState) -> bool:
     """最终组装：检查水印、确保输出完整。"""
     set_stage("组装", "running")
-    add_log("阶段6/6: 图文最终组装", "stage")
+    add_log("阶段5/5: 图文最终组装", "stage")
 
     st.session_state.progress_pct = 0.80
 
@@ -1288,7 +1841,7 @@ def execute_pipeline(url: str, style: str, enable_humanize: bool,
         existing = PipelineState.find_existing(url)
         if existing:
             done = set(existing.completed_stages)
-            needed = {"download", "transcribe", "write", "humanize", "generate_images", "assemble"}
+            needed = {"download", "transcribe", "write", "generate_images", "assemble"}
             if done >= needed:
                 add_log(f"该链接已有完整运行记录: {existing.run_id}", "success")
                 state = existing
@@ -1320,12 +1873,11 @@ def execute_pipeline(url: str, style: str, enable_humanize: bool,
         add_log(f"运行 ID: {state.run_id}", "info")
         add_log(f"输出目录: {state.run_dir}", "info")
 
-        # 阶段列表
+        # 阶段列表（write + humanize 已合并为研究-写作循环）
         stages = [
             ("download", "下载", step_download),
             ("transcribe", "转录", step_transcribe),
-            ("write", "写作", step_write),
-            ("humanize", "改写", step_humanize),
+            ("write", "研究写作", _research_and_write),
             ("generate_images", "配图", step_images),
             ("assemble", "组装", step_assemble),
         ]
@@ -1411,8 +1963,8 @@ def _load_result_from_state(state: PipelineState):
     st.session_state.result_data = _build_result(state)
     for s_name in state.completed_stages:
         stage_map = {
-            "download": "下载", "transcribe": "转录", "write": "写作",
-            "humanize": "改写", "generate_images": "配图", "assemble": "组装",
+            "download": "下载", "transcribe": "转录", "write": "研究写作",
+            "generate_images": "配图", "assemble": "组装",
         }
         set_stage(stage_map.get(s_name, s_name), "done")
     st.session_state.progress_pct = 1.0
@@ -1591,7 +2143,7 @@ def render_main():
 # ============================================================
 def render_progress():
     """渲染阶段进度条和指示灯。"""
-    stages_order = ["下载", "转录", "写作", "改写", "配图", "组装"]
+    stages_order = ["下载", "转录", "研究写作", "配图", "组装"]
 
     # 阶段指示灯行
     cols = st.columns(len(stages_order))
