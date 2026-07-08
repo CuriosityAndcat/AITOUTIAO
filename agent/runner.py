@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from agent.config import RunConfig
+from agent.memory import WorkingMemory
 from agent.types import AgentStatus, Reflection, TaskResult
 
 
@@ -86,6 +87,12 @@ class Runner:
         reflections: list[Reflection] = []
 
         try:
+            # 初始化工作记忆，由 Runner 统一注入
+            wm = WorkingMemory(
+                task=task,
+                max_iterations=cfg.max_iterations,
+            )
+
             # 构建并运行 StateGraph
             graph = AgentGraph.build(agent, cfg)
             state = graph.invoke(
@@ -94,6 +101,7 @@ class Runner:
                     "messages": [],
                     "draft": "",
                     "search_results": [],
+                    "working_memory": wm,
                     "iteration": 0,
                     "max_iterations": cfg.max_iterations,
                     "reflection": None,

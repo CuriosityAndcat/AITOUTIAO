@@ -139,6 +139,68 @@ class OutputGuardrail(BaseGuardrail):
         return GuardrailResult(passed=True, reason="输出检查通过")
 
 
+# ─── 策略合规护栏 ────────────────────────────────────────────────
+
+
+class PolicyGuardrail(BaseGuardrail):
+    """
+    策略合规护栏 — Layer 2：内容审核 + 版权检查
+
+    在输入清洗和输出格式验证之间执行，
+    确保生成内容不违反平台政策、不侵犯版权。
+    """
+
+    name: str = "policy_guardrail"
+    description: str = "检查内容的政策合规性和版权风险"
+
+    # ─── 敏感词名单（示例） ───
+    SENSITIVE_KEYWORDS: tuple = (
+        "台独", "藏独", "疆独", "港独",
+        "宣扬恐怖主义", "煽动民族仇恨",
+        "色情", "赌博", "毒品制作",
+    )
+
+    # ─── 版权风险模式 ───
+    COPYRIGHT_PATTERNS: tuple = (
+        "全文转载", "原文来自", "转载自",
+        "复制粘贴", "直接引用全文",
+    )
+
+    def check(self, input_data: str, context: dict | None = None) -> GuardrailResult:
+        if not input_data or not input_data.strip():
+            return GuardrailResult(
+                passed=False,
+                reason="内容为空，无法进行策略检查",
+                severity="error",
+            )
+
+        # 敏感词检查
+        for keyword in self.SENSITIVE_KEYWORDS:
+            if keyword in input_data:
+                return GuardrailResult(
+                    passed=False,
+                    reason=f"内容包含敏感关键词: {keyword}",
+                    severity="error",
+                    metadata={"matched_keyword": keyword},
+                )
+
+        # 版权风险检查
+        for pattern in self.COPYRIGHT_PATTERNS:
+            if pattern in input_data:
+                return GuardrailResult(
+                    passed=False,
+                    reason=f"检测到版权风险模式: {pattern}",
+                    severity="warning",
+                    metadata={"matched_pattern": pattern},
+                )
+
+        return GuardrailResult(
+            passed=True,
+            reason="策略合规检查通过",
+            severity="info",
+        )
+
+
 # ─── 护栏管线 ────────────────────────────────────────────────────
 
 

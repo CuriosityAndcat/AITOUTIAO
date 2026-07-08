@@ -114,6 +114,11 @@ def default_evaluator(draft: str, task: str, _state: dict | None = None) -> Refl
     默认 LLM 评估器 — 在没有自定义 evaluator 时使用。
 
     这是一个基于规则的简化评估器，实际生产环境应替换为 LLM 调用。
+
+    检查维度：
+    1. 输出非空
+    2. 输出长度 ≥ 50 字符
+    3. 任务关键词相关性（至少一个 task 关键词出现在 draft 中）
     """
     if not draft or not draft.strip():
         return Reflection(
@@ -128,6 +133,15 @@ def default_evaluator(draft: str, task: str, _state: dict | None = None) -> Refl
     if len(draft) < 50:
         concerns.append("输出过短，可能不完整")
 
+    # 任务关键词相关性检查：task 中至少一个下划线/中文关键词出现在 draft 中
+    if task:
+        import re
+        task_keywords = re.findall(r"[\u4e00-\u9fff\w]{2,}", task)
+        if task_keywords:
+            found = any(kw in draft for kw in task_keywords)
+            if not found:
+                concerns.append(f"输出未涉及任务关键词: {', '.join(task_keywords[:3])}")
+
     if concerns:
         return Reflection(
             missing="; ".join(concerns),
@@ -138,6 +152,6 @@ def default_evaluator(draft: str, task: str, _state: dict | None = None) -> Refl
 
     return Reflection(
         is_sufficient=True,
-        score=80,
+        score=85,
         feedback="输出合格",
     )

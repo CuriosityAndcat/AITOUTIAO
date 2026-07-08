@@ -10,7 +10,7 @@ TypedDict State 定义是 LangGraph StateGraph 编译的前提条件。
 
 from __future__ import annotations
 
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langgraph.graph.message import add_messages
 
@@ -38,6 +38,11 @@ class AgentState(TypedDict):
     # ── 搜索增强 ──
     search_results: list[SearchResult]
     # 执行前搜索阶段的结果列表。
+
+    # ── 工作记忆 ──
+    working_memory: Any
+    # WorkingMemory 实例，在 Runner.run_sync 初始化时注入。
+    # 各节点函数从中读写 search_context 和 reflections。
 
     # ── 执行产物 ──
     draft: str

@@ -39,7 +39,13 @@ from typing import Any, Literal
 from langgraph.graph import END, StateGraph
 
 from agent.config import RunConfig
-from agent.guardrails import GuardrailPipeline, GuardrailResult
+from agent.guardrails import (
+    GuardrailPipeline,
+    GuardrailResult,
+    InputGuardrail,
+    OutputGuardrail,
+    PolicyGuardrail,
+)
 from agent.memory import WorkingMemory
 from agent.state import AgentState
 from agent.types import AgentStatus, Reflection
@@ -157,11 +163,28 @@ class AgentGraph:
         搜索增强节点 — Search-Before-Act
 
         在执行前进行信息检索，增强上下文。
+        同时执行 InputGuardrail 输入校验。
         """
         task = state.get("task", "")
         iteration = state.get("iteration", 0)
-
+        wm = state.get("working_memory")
         search_results = list(state.get("search_results", []))
+
+        # ── 输入护栏检查 ──
+        input_pipeline = GuardrailPipeline(
+            guardrails=[InputGuardrail(), PolicyGuardrail()],
+            fail_fast=True,
+        )
+        guard_results = input_pipeline.run(task)
+        if not input_pipeline.is_all_passed(guard_results):
+            failed = next((r for r in guard_results if not r.passed), None)
+            return {
+                "search_results": search_results,
+                "iteration": iteration,
+                "next_action": "BLOCKED",
+                "error": f"输入护栏拦截: {failed.reason if failed else '未知原因'}",
+                "status": AgentStatus.BLOCKED,
+            }
 
         # 如果有自定义 search_provider，使用它
         if agent.search_provider:
@@ -172,9 +195,19 @@ class AgentGraph:
             except Exception:
                 pass
 
+        # ── 同步 WorkingMemory ──
+        if wm is not None:
+            findings_text = "; ".join(
+                getattr(r, "findings", "") for r in search_results
+                if hasattr(r, "findings") and getattr(r, "findings", "")
+            )
+            if findings_text:
+                wm.search_context = f"{wm.search_context}; {findings_text}".strip("; ")
+
         return {
             "search_results": search_results,
             "iteration": iteration,  # 搜索不消耗迭代计数
+            "working_memory": wm,
         }
 
     @staticmethod
@@ -185,6 +218,8 @@ class AgentGraph:
         这里是 LLM 调用的核心位置。
         当前是骨架版本，使用简单的模板填充，
         后续迭代接入 LLM API。
+
+        生成 draft 后执行 OutputGuardrail 输出校验。
         """
         task = state.get("task", "")
         search_results = state.get("search_results", [])
@@ -206,6 +241,21 @@ class AgentGraph:
             search_context=search_results,
         )
 
+        # ── 输出护栏检查 ──
+        output_pipeline = GuardrailPipeline(
+            guardrails=[OutputGuardrail(), PolicyGuardrail()],
+            fail_fast=True,
+        )
+        guard_results = output_pipeline.run(draft)
+        if not output_pipeline.is_all_passed(guard_results):
+            failed = next((r for r in guard_results if not r.passed), None)
+            return {
+                "draft": draft,
+                "next_action": "BLOCKED",
+                "status": AgentStatus.BLOCKED,
+                "error": f"输出护栏拦截: {failed.reason if failed else '未知原因'}",
+            }
+
         return {
             "draft": draft,
         }
@@ -217,16 +267,26 @@ class AgentGraph:
 
         使用评估器（自定义或默认）审查 execute 节点的输出。
         """
+        from agent.agent import default_evaluator
+
         draft = state.get("draft", "")
         task = state.get("task", "")
         iteration = state.get("iteration", 0) + 1
         reflections = list(state.get("reflections", []))
 
-        # 使用自定义评估器或默认评估器
-        evaluator = agent.evaluator or _default_llm_evaluator
+        # 使用自定义评估器或默认评估器（统一来自 agent.py）
+        evaluator = agent.evaluator or default_evaluator
         reflection = evaluator(draft, task, dict(state))
 
-        reflection.score = _calculate_score(reflection)
+        # 确保分数存在（默认评估器已设置，自定义评估器可能未设置）
+        if reflection.score is None:
+            score = 80
+            if reflection.missing:
+                score -= min(30, len(reflection.missing) // 10)
+            if reflection.superfluous:
+                score -= min(20, len(reflection.superfluous) // 10)
+            reflection.score = max(0, min(100, score))
+
         reflections.append(reflection)
 
         status = AgentStatus.DONE
@@ -267,9 +327,14 @@ class AgentGraph:
         """
         draft = state.get("draft", "")
         reflection = state.get("reflection")
+        wm = state.get("working_memory")
 
         if reflection is None:
             return {"draft": draft}
+
+        # ── 同步 WorkingMemory 反思记录 ──
+        if wm is not None and reflection.feedback:
+            wm.add_reflection(reflection.feedback)
 
         # 构造修正 prompt
         fix_prompt = f"""根据以下反馈修正草稿：
@@ -293,6 +358,7 @@ class AgentGraph:
 
         return {
             "draft": revised,
+            "working_memory": wm,
         }
 
 
@@ -325,57 +391,3 @@ def _generate_draft(
         + (f"搜索上下文: {context_str}\n" if context_str else "")
         + f"\n--- 此处为骨架版输出，后续接入 LLM API ---"
     )
-
-
-def _default_llm_evaluator(
-    draft: str,
-    task: str,
-    _state: dict | None = None,
-) -> Reflection:
-    """
-    默认评估器（基于规则的简化版）
-
-    后续迭代中替换为 LLM 驱动的评估器。
-    """
-    if not draft or not draft.strip():
-        return Reflection(
-            missing="输出内容为空",
-            is_sufficient=False,
-            score=0,
-            feedback="需要生成具体内容",
-        )
-
-    concerns: list[str] = []
-
-    if len(draft) < 50:
-        concerns.append("输出过短，需要更详细的内容")
-
-    if task not in draft:
-        concerns.append("输出未涉及原始任务")
-
-    if concerns:
-        return Reflection(
-            missing="; ".join(concerns),
-            is_sufficient=False,
-            score=40,
-            feedback="请根据上述缺失项修正输出",
-        )
-
-    return Reflection(
-        is_sufficient=True,
-        score=85,
-        feedback="输出达标",
-    )
-
-
-def _calculate_score(reflection: Reflection) -> int:
-    """根据 missing/superfluous 状态计算分数"""
-    if reflection.score is not None:
-        return reflection.score
-
-    score = 80
-    if reflection.missing:
-        score -= min(30, len(reflection.missing) // 10)
-    if reflection.superfluous:
-        score -= min(20, len(reflection.superfluous) // 10)
-    return max(0, min(100, score))

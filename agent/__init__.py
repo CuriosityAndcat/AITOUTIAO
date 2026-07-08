@@ -60,6 +60,7 @@ from agent.guardrails import (
     GuardrailPipeline,
     InputGuardrail,
     OutputGuardrail,
+    PolicyGuardrail,
     BaseGuardrail,
 )
 
@@ -99,6 +100,7 @@ __all__ = [
     "GuardrailPipeline",
     "InputGuardrail",
     "OutputGuardrail",
+    "PolicyGuardrail",
     "BaseGuardrail",
     # Memory
     "ConversationMemory",
@@ -110,4 +112,4 @@ __all__ = [
     "default_evaluator",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
