@@ -1,16 +1,17 @@
 """
-Agent 系统骨架 v0.1
+Agent 系统 v0.2
 
 对齐框架:
     - LangGraph StateGraph API (graph.py)
     - OpenAI Agents SDK (agent.py, runner.py, config.py, tools.py, guardrails.py)
     - LangGraph Reflexion (types.py, graph.py)
+    - DeepSeek LLM API (llm_client.py)
 
 核心架构:
-    ┌────────────┐     ┌──────────┐     ┌───────────┐
-    │   Agent     │───▶│  Runner   │───▶│ AgentGraph │
-    │ (身份/能力) │     │ (编排器)  │     │ (工作流图) │
-    └────────────┘     └──────────┘     └───────────┘
+    ┌────────────┐     ┌──────────┐     ┌───────────┐     ┌──────────┐
+    │   Agent     │───▶│  Runner   │───▶│ AgentGraph │───▶│ LLMClient │
+    │ (身份/能力) │     │ (编排器)  │     │ (工作流图) │     │ (DeepSeek)│
+    └────────────┘     └──────────┘     └───────────┘     └──────────┘
 
 快速开始:
     from agent import Agent, Runner, RunConfig
@@ -46,6 +47,9 @@ from agent.config import RunConfig
 
 # ─── 图构建器 ────────────────────────────────────────────────────
 from agent.graph import AgentGraph
+
+# ─── LLM 客户端 ───────────────────────────────────────────────────
+from agent.llm_client import LLMClient
 
 # ─── 工具系统 ────────────────────────────────────────────────────
 from agent.tools import (
@@ -91,6 +95,8 @@ __all__ = [
     "RunConfig",
     # Graph
     "AgentGraph",
+    # LLM
+    "LLMClient",
     # Tools
     "function_tool",
     "FunctionTool",
@@ -112,4 +118,4 @@ __all__ = [
     "default_evaluator",
 ]
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"

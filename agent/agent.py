@@ -109,17 +109,82 @@ class Agent:
 # ─── 内置评估器（默认 LLM 评估） ────────────────────────────────
 
 
-def default_evaluator(draft: str, task: str, _state: dict | None = None) -> Reflection:
+def default_evaluator(
+    draft: str,
+    task: str,
+    _state: dict | None = None,
+    llm_client: Any = None,
+) -> Reflection:
     """
-    默认 LLM 评估器 — 在没有自定义 evaluator 时使用。
+    默认评估器 — 优先使用 LLM 驱动评估，不可用时降级为规则检查。
 
-    这是一个基于规则的简化评估器，实际生产环境应替换为 LLM 调用。
+    当提供 llm_client 时，使用 LLM 对输出进行结构化评估；
+    否则使用基于规则的简化评估器。
 
     检查维度：
     1. 输出非空
     2. 输出长度 ≥ 50 字符
     3. 任务关键词相关性（至少一个 task 关键词出现在 draft 中）
+    4. 如果使用 LLM 评估，额外检查内容完整性、逻辑连贯性
     """
+    # ── LLM 驱动评估（优先） ──
+    if llm_client is not None:
+        try:
+            eval_prompt = f"""请评估以下内容是否满足任务要求。
+
+任务描述：
+{task}
+
+生成内容：
+{draft}
+
+请从以下维度评估（用 JSON 格式回复）：
+1. 内容是否完整覆盖了任务要求的关键点
+2. 逻辑是否连贯清晰
+3. 是否有多余或不相关的废话
+4. 综合评分（0-100）
+5. 是否需要修正（true/false）
+
+请以 JSON 格式回复：
+{{
+  "is_sufficient": true/false,
+  "score": 0-100,
+  "missing": "缺失的关键内容（无则填null）",
+  "superfluous": "多余的无关内容（无则填null）",
+  "feedback": "改进建议"
+}}"""
+
+            response = llm_client.generate(
+                prompt=eval_prompt,
+                system_prompt="你是一个专业的内容质量评审专家。请严格、客观地评估。",
+                temperature=0.3,  # 评估使用低温度确保一致性
+            )
+
+            # 尝试解析 JSON
+            import json
+            import re
+
+            # 提取 JSON 部分（处理 LLM 可能在 JSON 外添加说明的情况）
+            json_match = re.search(r"\{[^{}]*\}", response, re.DOTALL)
+            if json_match:
+                eval_data = json.loads(json_match.group())
+                return Reflection(
+                    missing=eval_data.get("missing"),
+                    superfluous=eval_data.get("superfluous"),
+                    score=eval_data.get("score", 80),
+                    is_sufficient=eval_data.get("is_sufficient", True),
+                    feedback=eval_data.get("feedback"),
+                )
+
+            # JSON 解析失败，降级到规则检查
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning("LLM 评估器 JSON 解析失败，降级到规则检查")
+
+        except Exception as e:
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning("LLM 评估器调用失败: %s，降级到规则检查", e)
+
+    # ── 规则检查（Fallback） ──
     if not draft or not draft.strip():
         return Reflection(
             missing="输出为空",

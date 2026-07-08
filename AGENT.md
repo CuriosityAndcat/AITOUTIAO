@@ -133,5 +133,6 @@ Layer 3: OutputGuardrail — 输出校验（格式验证、安全检查）
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v1.1.0 | 2026-07-08 | Agent v0.2.0：接入 DeepSeek LLM API（新增 LLMClient），重写 _generate_draft 从骨架到生产，增强 default_evaluator 支持 LLM 驱动评估，集成 Agent/Runner 到 pipeline.py WriteStage，新增 74 个单元测试（types/guardrails/evaluator/config/llm_client） |
 | v1.0.1 | 2026-07-08 | 代码质量修正：补充 PolicyGuardrail 三层护栏完整化、消除 graph.py 与 agent.py 评估器重复、接入护栏管线与工作记忆到工作流 |
 | v1.0 | 2026-07-08 | 初始版本，定义三条核心规则、完成协议、护栏分层 |

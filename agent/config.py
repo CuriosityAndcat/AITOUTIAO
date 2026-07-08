@@ -25,6 +25,9 @@ class RunConfig:
         max_iterations: Evaluator-Optimizer 循环的最大迭代次数。
         temperature: LLM 调用温度参数。
         model: 使用的模型名称。
+        api_key: LLM API 密钥（可从环境变量 AI_API_KEY 读取）。
+        base_url: LLM API 端点（可从环境变量 AI_BASE_URL 读取）。
+        max_tokens: 单次 LLM 调用的最大 token 数。
         tracing_enabled: 是否启用追踪。
         trace_id: 追踪 ID。
         checkpointer: 状态持久化回调（可选）。
@@ -41,6 +44,22 @@ class RunConfig:
 
     model: str = "deepseek-chat"
     """使用的 LLM 模型名称。"""
+
+    # ── LLM API 配置 ──
+    api_key: str = ""
+    """
+    LLM API 密钥。
+    默认从环境变量 AI_API_KEY 读取，与 toutiao-auto-publisher 配置对齐。
+    """
+
+    base_url: str = "https://api.deepseek.com/v1"
+    """
+    LLM API 端点 URL。
+    默认从环境变量 AI_BASE_URL 读取，与 toutiao-auto-publisher 配置对齐。
+    """
+
+    max_tokens: int = 2000
+    """单次 LLM 调用的最大输出 token 数。"""
 
     # ── 可观测性 ──
     tracing_enabled: bool = True
@@ -66,3 +85,14 @@ class RunConfig:
     # ── 元数据 ──
     metadata: dict[str, Any] = field(default_factory=dict)
     """附加元数据，用于日志和追踪。"""
+
+    def __post_init__(self):
+        """从环境变量自动填充 API 配置（如果未显式设置）"""
+        import os
+
+        if not self.api_key:
+            self.api_key = os.getenv("AI_API_KEY", "")
+        if self.base_url == "https://api.deepseek.com/v1":
+            env_url = os.getenv("AI_BASE_URL", "")
+            if env_url:
+                self.base_url = env_url

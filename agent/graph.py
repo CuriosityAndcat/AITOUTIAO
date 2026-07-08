@@ -34,6 +34,7 @@ AgentGraph — Evaluator-Optimizer 工作流图构建器
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from langgraph.graph import END, StateGraph
@@ -46,9 +47,12 @@ from agent.guardrails import (
     OutputGuardrail,
     PolicyGuardrail,
 )
+from agent.llm_client import LLMClient
 from agent.memory import WorkingMemory
 from agent.state import AgentState
 from agent.types import AgentStatus, Reflection
+
+logger = logging.getLogger(__name__)
 
 
 class AgentGraph:
@@ -77,16 +81,33 @@ class AgentGraph:
         Returns:
             编译后的 StateGraph 实例，可直接 invoke
         """
+        # —— 创建 LLMClient（全局单例，避免重复初始化） ——
+        llm_client = None
+        if config.api_key:
+            try:
+                llm_client = LLMClient.from_config(config)
+                logger.info("LLMClient 初始化成功 (model=%s)", config.model)
+            except Exception as e:
+                logger.warning("LLMClient 初始化失败，将使用骨架模式: %s", e)
+
         builder = StateGraph(AgentState)
 
         # —— 注册节点 ——
-        # 使用 functools.partial 绑定 agent + config
+        # 使用 functools.partial 绑定 agent + config + llm_client
         import functools
 
-        search_node = functools.partial(AgentGraph._search_node, agent=agent, config=config)
-        execute_node = functools.partial(AgentGraph._execute_node, agent=agent, config=config)
-        evaluate_node = functools.partial(AgentGraph._evaluate_node, agent=agent, config=config)
-        fix_node = functools.partial(AgentGraph._fix_node, agent=agent, config=config)
+        search_node = functools.partial(
+            AgentGraph._search_node, agent=agent, config=config,
+        )
+        execute_node = functools.partial(
+            AgentGraph._execute_node, agent=agent, config=config, llm_client=llm_client,
+        )
+        evaluate_node = functools.partial(
+            AgentGraph._evaluate_node, agent=agent, config=config, llm_client=llm_client,
+        )
+        fix_node = functools.partial(
+            AgentGraph._fix_node, agent=agent, config=config, llm_client=llm_client,
+        )
 
         builder.add_node("search", search_node)       # type: ignore[arg-type]
         builder.add_node("execute", execute_node)     # type: ignore[arg-type]
@@ -211,34 +232,46 @@ class AgentGraph:
         }
 
     @staticmethod
-    def _execute_node(state: AgentState, agent, config: RunConfig) -> dict[str, Any]:
+    def _execute_node(
+        state: AgentState, agent, config: RunConfig,
+        llm_client: LLMClient | None = None,
+    ) -> dict[str, Any]:
         """
         执行节点 — 生成/执行任务
 
         这里是 LLM 调用的核心位置。
-        当前是骨架版本，使用简单的模板填充，
-        后续迭代接入 LLM API。
+        优先使用 LLMClient 进行真实 API 调用，
+        LLMClient 不可用时降级为骨架模式。
 
         生成 draft 后执行 OutputGuardrail 输出校验。
         """
         task = state.get("task", "")
         search_results = state.get("search_results", [])
+        wm = state.get("working_memory")
 
-        # 构造增强的上下文
-        context_parts = [task]
+        # 构造搜索上下文文本（注入 prompt）
+        search_context_text = ""
         if search_results:
             findings = "\n".join(
-                r.findings for r in search_results if hasattr(r, "findings")
+                r.findings for r in search_results
+                if hasattr(r, "findings") and getattr(r, "findings", "")
             )
             if findings:
-                context_parts.append(f"\n搜索增强上下文：\n{findings}")
+                search_context_text = findings
 
-        # 使用 agent 的 instructions 作为 system prompt
-        # 此处是骨架版本，实际执行会调用 LLM
+        # 注入 WorkingMemory 上下文
+        wm_context = ""
+        if wm is not None and hasattr(wm, "to_prompt"):
+            wm_context = wm.to_prompt()
+
+        # 调用 LLM 生成
         draft = _generate_draft(
             task=task,
             instructions=agent.instructions,
-            search_context=search_results,
+            search_context_text=search_context_text,
+            wm_context=wm_context,
+            llm_client=llm_client,
+            config=config,
         )
 
         # ── 输出护栏检查 ──
@@ -261,13 +294,18 @@ class AgentGraph:
         }
 
     @staticmethod
-    def _evaluate_node(state: AgentState, agent, config: RunConfig) -> dict[str, Any]:
+    def _evaluate_node(
+        state: AgentState, agent, config: RunConfig,
+        llm_client: LLMClient | None = None,
+    ) -> dict[str, Any]:
         """
         评估节点 — Review-and-Decide
 
         使用评估器（自定义或默认）审查 execute 节点的输出。
+        当 custom_evaluator 支持 llm_client 参数时，自动注入。
         """
         from agent.agent import default_evaluator
+        import inspect
 
         draft = state.get("draft", "")
         task = state.get("task", "")
@@ -276,7 +314,18 @@ class AgentGraph:
 
         # 使用自定义评估器或默认评估器（统一来自 agent.py）
         evaluator = agent.evaluator or default_evaluator
-        reflection = evaluator(draft, task, dict(state))
+
+        # 检查评估器是否支持 llm_client 参数
+        evaluator_kwargs: dict[str, Any] = {}
+        if llm_client is not None:
+            try:
+                sig = inspect.signature(evaluator)
+                if "llm_client" in sig.parameters:
+                    evaluator_kwargs["llm_client"] = llm_client
+            except (ValueError, TypeError):
+                pass  # 无法检查签名时忽略
+
+        reflection = evaluator(draft, task, dict(state), **evaluator_kwargs)
 
         # 确保分数存在（默认评估器已设置，自定义评估器可能未设置）
         if reflection.score is None:
@@ -319,7 +368,10 @@ class AgentGraph:
         }
 
     @staticmethod
-    def _fix_node(state: AgentState, agent, config: RunConfig) -> dict[str, Any]:
+    def _fix_node(
+        state: AgentState, agent, config: RunConfig,
+        llm_client: LLMClient | None = None,
+    ) -> dict[str, Any]:
         """
         修正节点 — Loop-Until-Pass 中的修正步骤
 
@@ -336,24 +388,38 @@ class AgentGraph:
         if wm is not None and reflection.feedback:
             wm.add_reflection(reflection.feedback)
 
-        # 构造修正 prompt
-        fix_prompt = f"""根据以下反馈修正草稿：
+        # 如果有自定义 fixer，优先使用
+        if agent.fixer:
+            try:
+                revised = agent.fixer(draft, reflection, dict(state))
+                return {
+                    "draft": revised,
+                    "working_memory": wm,
+                }
+            except Exception:
+                pass  # 降级到 LLM 修正
 
-原始草稿：
+        # 构造修正 prompt
+        fix_prompt = f"""请根据以下审查反馈，修正并改进草稿内容。
+
+=== 原始草稿 ===
 {draft}
 
-审查反馈：
+=== 审查反馈 ===
 - 缺失内容：{reflection.missing or '无'}
 - 多余内容：{reflection.superfluous or '无'}
 - 改进建议：{reflection.feedback or '无'}
 
-请修正草稿，补充缺失内容，移除多余部分。"""
+请输出修正后的完整草稿，补充缺失内容，移除多余部分，并采纳改进建议。"""
 
-        # 此处是骨架版本，实际修正会调用 LLM
+        # 调用 LLM 进行修正
         revised = _generate_draft(
             task=state.get("task", ""),
             instructions=fix_prompt,
-            search_context=state.get("search_results", []),
+            search_context_text="",
+            wm_context="",
+            llm_client=llm_client,
+            config=config,
         )
 
         return {
@@ -368,26 +434,85 @@ class AgentGraph:
 def _generate_draft(
     task: str,
     instructions: str,
-    search_context: list | None = None,
+    search_context_text: str = "",
+    wm_context: str = "",
+    llm_client: LLMClient | None = None,
+    config: RunConfig | None = None,
 ) -> str:
     """
-    生成草稿（骨架版）。
+    生成草稿 — 优先使用 LLMClient，不可用时降级为骨架模式。
 
-    后续迭代中替换为实际 LLM API 调用。
+    Args:
+        task: 任务描述（作为 user prompt）。
+        instructions: Agent 指令（作为 system prompt）。
+        search_context_text: 搜索增强上下文文本。
+        wm_context: 工作记忆上下文文本。
+        llm_client: LLM 客户端实例（可选）。
+        config: 运行配置（用于 temperature 等参数）。
+
+    Returns:
+        生成的文本内容。
     """
-    context_str = ""
-    if search_context:
-        from agent.types import SearchResult
-        findings = (
-            r.findings for r in search_context
-            if isinstance(r, SearchResult) and r.findings
-        )
-        context_str = "; ".join(findings)
+    # ── 构造完整的 system prompt ──
+    system_prompt = instructions
+    extra_context_parts = []
+    if search_context_text:
+        extra_context_parts.append(f"【搜索增强参考信息】\n{search_context_text}")
+    if wm_context:
+        extra_context_parts.append(f"【工作记忆】\n{wm_context}")
 
-    return (
-        f"[Agent 生成草稿]\n"
-        f"任务: {task}\n"
-        f"指令: {instructions[:200]}...\n"
-        + (f"搜索上下文: {context_str}\n" if context_str else "")
-        + f"\n--- 此处为骨架版输出，后续接入 LLM API ---"
-    )
+    if extra_context_parts:
+        system_prompt = system_prompt + "\n\n" + "\n\n".join(extra_context_parts)
+
+    # ── 真实 LLM 调用 ──
+    if llm_client is not None:
+        try:
+            temperature = config.temperature if config else None
+            max_tokens = config.max_tokens if config else None
+
+            logger.info(
+                "_generate_draft: 调用 LLM (model=%s, temp=%s, max_tokens=%s)",
+                llm_client.model, temperature, max_tokens,
+            )
+
+            response = llm_client.generate(
+                prompt=task,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            logger.info("_generate_draft: LLM 返回 %d 字符", len(response))
+            return response
+
+        except Exception as e:
+            logger.error("_generate_draft: LLM 调用失败: %s", e)
+            # 降级到骨架模式
+            return _skeleton_draft(task, instructions, search_context_text, str(e))
+
+    # ── 骨架模式（无 LLMClient 时的 fallback） ──
+    logger.warning("_generate_draft: 无 LLMClient，使用骨架模式")
+    return _skeleton_draft(task, instructions, search_context_text)
+
+
+def _skeleton_draft(
+    task: str,
+    instructions: str,
+    search_context_text: str = "",
+    error_msg: str = "",
+) -> str:
+    """
+    骨架模式 — 当 LLM 不可用时的降级输出。
+
+    返回模板文本，附带错误信息以便调试。
+    """
+    parts = [
+        f"[Agent 骨架草稿]",
+        f"任务: {task}",
+        f"指令: {instructions[:300]}{'...' if len(instructions) > 300 else ''}",
+    ]
+    if search_context_text:
+        parts.append(f"搜索上下文: {search_context_text[:300]}...")
+    if error_msg:
+        parts.append(f"\n⚠ LLM 调用失败: {error_msg}")
+    parts.append("\n--- 当前为骨架模式，请接入 LLM API ---")
+    return "\n".join(parts)

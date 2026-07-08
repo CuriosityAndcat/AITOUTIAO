@@ -447,7 +447,7 @@ class TranscribeStage(StageRunner):
 
 
 class WriteStage(StageRunner):
-    """AI 改写阶段：调用 toutiao-auto-publisher 的 /api/generate"""
+    """AI 改写阶段：优先使用 Agent/Runner 编排，HTTP API 作为降级"""
 
     def run(self) -> bool:
         self.log(f"[3/4] AI 改写")
@@ -460,17 +460,127 @@ class WriteStage(StageRunner):
 
         self.log(f"  转录文本: {len(transcript)} 字符")
 
-        # 2. 调用 AI 生成 API
+        content_type = self.state.content_type
+        enable_humanize = self.state.enable_humanize
+
+        # 2. 优先使用 Agent/Runner 编排
+        self.log(f"  尝试 Agent 编排模式 (content_type={content_type})...")
+        success = self._run_via_agent(transcript, content_type, enable_humanize)
+
+        # 3. Agent 失败时降级到 HTTP API
+        if not success:
+            self.log("  Agent 模式不可用，降级到 HTTP API 模式...")
+            success = self._run_via_api(transcript, content_type, enable_humanize)
+
+        return success
+
+    def _run_via_agent(
+        self, transcript: str, content_type: str, enable_humanize: bool
+    ) -> bool:
+        """使用 Agent/Runner 编排生成内容"""
+        try:
+            from agent import Agent, Runner, RunConfig
+
+            # 构造 Agent 指令
+            if content_type == "toutie":
+                agent_instructions = (
+                    "你是一个专业的微头条内容创作者，擅长将原始素材改写成吸引人的微头条。\n"
+                    "微头条要求：\n"
+                    "- 字数控制在 200-500 字\n"
+                    "- 开头用悬念、反问或金句吸引注意\n"
+                    "- 观点鲜明，有个人态度\n"
+                    "- 适当使用 emoji 增强可读性\n"
+                    "- 符合头条平台调性，接地气但不低俗\n\n"
+                    "请根据提供的转录文本，生成一篇高质量的微头条。\n"
+                    "输出格式要求：返回一个 JSON 对象，包含 title 和 content 两个字段。\n"
+                    '格式: {"title": "标题", "content": "正文内容"}'
+                )
+            else:
+                agent_instructions = (
+                    "你是一个专业的文章写作者，擅长将原始素材改写成深度文章。\n"
+                    "文章要求：\n"
+                    "- 结构完整：引言、正文（3-5个段落）、结论\n"
+                    "- 逻辑清晰，论据充分\n"
+                    "- 语言流畅，适合大众阅读\n"
+                    "- 字数 800-2000 字\n\n"
+                    "请根据提供的转录文本，生成一篇高质量的文章。\n"
+                    "输出格式要求：返回一个 JSON 对象，包含 title 和 content 两个字段。\n"
+                    '格式: {"title": "文章标题", "content": "文章正文（含段落分隔）"}'
+                )
+
+            # 构造任务描述
+            task = f"请根据以下视频转录文本，生成一篇{content_type}：\n\n{transcript[:3000]}"
+
+            # 创建 Agent 和配置
+            agent = Agent(
+                name="ContentWriter",
+                instructions=agent_instructions,
+                description=f"生成{content_type}内容的写作 Agent",
+            )
+            config = RunConfig(
+                max_iterations=3,
+                temperature=0.7,
+                max_tokens=2000,
+            )
+
+            # 执行
+            self.log("  执行 Agent 编排 (Search→Execute→Evaluate→Fix)...")
+            result = Runner.run_sync(agent, task, config=config)
+
+            if not result.is_success or not result.final_output:
+                self.log(f"  Agent 执行未成功: status={result.status}")
+                if result.error:
+                    self.log(f"  错误: {result.error}")
+                return False
+
+            self.log(f"  Agent 执行完成: iterations={result.iterations}, status={result.status}")
+
+            # 解析输出
+            title, content = self._parse_agent_output(result.final_output)
+
+            if not content:
+                self.log("  ✗ Agent 输出解析失败")
+                return False
+
+            # 人工化改写
+            humanized_content = None
+            if enable_humanize:
+                self.log("  🔄 人工化改写中（去 AI 味）...")
+                try:
+                    sys.path.insert(0, str(Path(__file__).parent / "toutiao-auto-publisher" / "backend"))
+                    from ai_writer import AIWriter
+                    hwriter = AIWriter()
+                    hresult = hwriter.humanize(content)
+                    humanized_content = hresult["content"]
+                    self.log(f"  ✓ 人工化完成 ({hresult['char_count']} 字符)")
+                except Exception as e:
+                    self.log(f"  ⚠ 人工化失败（使用原文）: {e}")
+
+            # 保存结果
+            final_content = humanized_content or content
+            self._save_output(title, final_content, content_type, humanized_content)
+            return True
+
+        except ImportError as e:
+            self.log(f"  Agent 模块导入失败: {e}")
+            return False
+        except Exception as e:
+            self.log(f"  Agent 模式异常: {e}")
+            return False
+
+    def _run_via_api(
+        self, transcript: str, content_type: str, enable_humanize: bool
+    ) -> bool:
+        """降级模式：通过 HTTP API 调用生成（原有逻辑）"""
         import requests
 
-        content_type = self.state.content_type
         self.log(f"  调用 AI 生成 API (content_type={content_type})...")
 
         try:
             resp = requests.post(
                 f"{PUBLISH_API_BASE}/api/generate",
                 json={
-                    "topic": transcript[:2000],  # 取前2000字作为 topic
+                    "topic": transcript[:2000],
                     "content_type": content_type,
                     "content_style": "military",
                 },
@@ -486,9 +596,9 @@ class WriteStage(StageRunner):
 
                 self.log(f"  ✓ AI 生成完成 ({char_count} 字符)")
 
-                # ── 人工化改写（可选） ──
+                # 人工化改写
                 humanized_content = None
-                if self.state.enable_humanize:
+                if enable_humanize:
                     self.log("  🔄 人工化改写中（去 AI 味）...")
                     try:
                         sys.path.insert(0, str(Path(__file__).parent / "toutiao-auto-publisher" / "backend"))
@@ -500,26 +610,8 @@ class WriteStage(StageRunner):
                     except Exception as e:
                         self.log(f"  ⚠ 人工化失败（使用原文）: {e}")
 
-                # 保存到文件
                 final_content = humanized_content or content
-                output_file = self.run_dir / f"微头条_{self.state.run_id}.md" if content_type == "toutie" else self.run_dir / f"文章_{self.state.run_id}.md"
-                output_file.write_text(
-                    f"# {title}\n\n{final_content}\n\n---\n*生成于 {datetime.now().isoformat()}*",
-                    encoding="utf-8",
-                )
-
-                # 同时保存原始 AI 版本（供对比）
-                if humanized_content:
-                    raw_file = self.run_dir / f"微头条_{self.state.run_id}_ai_raw.md"
-                    raw_file.write_text(
-                        f"# {title}\n\n{content}\n\n---\n*AI 原始生成，未经人工化处理*",
-                        encoding="utf-8",
-                    )
-
-                self.state.outputs["generated_title"] = title
-                self.state.outputs["generated_content"] = final_content
-                self.state.outputs["generated_file"] = str(output_file)
-                self.log(f"  输出: {output_file.name}")
+                self._save_output(title, final_content, content_type, humanized_content)
                 return True
             else:
                 self.log(f"  ✗ AI 生成失败: {data.get('error', 'unknown')}")
@@ -532,6 +624,66 @@ class WriteStage(StageRunner):
         except Exception as e:
             self.log(f"  ✗ API 调用异常: {e}")
             return False
+
+    def _parse_agent_output(self, raw_output: str) -> tuple:
+        """
+        解析 Agent 输出的 JSON，提取 title 和 content。
+
+        支持格式：
+        - 纯 JSON: {"title": "...", "content": "..."}
+        - JSON 包裹在代码块中: ```json ... ```
+        - 无 title 时返回空 title + 全文作为 content
+        """
+        import json
+        import re
+
+        # 尝试提取 JSON 代码块
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw_output)
+        if json_match:
+            raw_output = json_match.group(1).strip()
+
+        try:
+            data = json.loads(raw_output)
+            return data.get("title", ""), data.get("content", "")
+        except json.JSONDecodeError:
+            # 尝试从文本中提取 JSON 对象
+            json_match = re.search(r"\{[\s\S]*\}", raw_output)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group())
+                    return data.get("title", ""), data.get("content", "")
+                except json.JSONDecodeError:
+                    pass
+
+        # 解析失败，全文作为 content
+        return "", raw_output
+
+    def _save_output(
+        self, title: str, content: str, content_type: str,
+        humanized_content: str | None = None,
+    ):
+        """保存生成内容到文件"""
+        prefix = "微头条" if content_type == "toutie" else "文章"
+        output_file = self.run_dir / f"{prefix}_{self.state.run_id}.md"
+        output_file.write_text(
+            f"# {title}\n\n{content}\n\n---\n*生成于 {datetime.now().isoformat()}*",
+            encoding="utf-8",
+        )
+
+        # 同时保存原始 AI 版本
+        if humanized_content:
+            raw_file = self.run_dir / f"{prefix}_{self.state.run_id}_ai_raw.md"
+            # 原始版本的 content 需要从 state 中还原
+            original = self.state.outputs.get("_raw_ai_content", content)
+            raw_file.write_text(
+                f"# {title}\n\n{original}\n\n---\n*AI 原始生成，未经人工化处理*",
+                encoding="utf-8",
+            )
+
+        self.state.outputs["generated_title"] = title
+        self.state.outputs["generated_content"] = content
+        self.state.outputs["generated_file"] = str(output_file)
+        self.log(f"  输出: {output_file.name}")
 
     def _load_transcript(self) -> Optional[str]:
         """从已有的输出文件中加载转录文本"""
