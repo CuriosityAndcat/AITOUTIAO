@@ -1,0 +1,540 @@
+"""
+音频提取模块
+从本地媒体文件（视频/音频）中提取音频并进行优化
+"""
+
+import os
+import shutil
+import subprocess
+import asyncio
+from pathlib import Path
+from typing import Optional, Callable
+from datetime import datetime
+
+from pydub import AudioSegment
+from loguru import logger
+
+from models.schemas import MediaFileInfo, MediaFormat
+from utils.ffmpeg import configure_pydub_ffmpeg, get_ffmpeg_path
+
+
+class AudioExtractor:
+    """音频提取器"""
+
+    def __init__(self, temp_dir: str = "./temp", cleanup_after: int = 3600):
+        """
+        初始化提取器
+
+        Args:
+            temp_dir: 临时文件目录
+            cleanup_after: 清理文件的时间间隔(秒)
+        """
+        self.temp_dir = Path(temp_dir)
+        self.cleanup_after = cleanup_after
+
+        # 确保临时目录存在
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+        # 将 FFmpeg 完整路径配置到 pydub，避免 PATH 环境变量问题
+        configure_pydub_ffmpeg()
+
+        # 支持的媒体格式（视频 + 音频）
+        self.supported_formats = {
+            MediaFormat.MP4: ['.mp4'],
+            MediaFormat.AVI: ['.avi'],
+            MediaFormat.MKV: ['.mkv'],
+            MediaFormat.MOV: ['.mov'],
+            MediaFormat.WMV: ['.wmv'],
+            MediaFormat.FLV: ['.flv'],
+            MediaFormat.WEBM: ['.webm'],
+            MediaFormat.MPEG: ['.mpeg', '.mpg', '.mp2'],
+            MediaFormat.M4V: ['.m4v'],
+            MediaFormat.MP3: ['.mp3'],
+            MediaFormat.WAV: ['.wav'],
+            MediaFormat.M4A: ['.m4a'],
+            MediaFormat.AAC: ['.aac'],
+            MediaFormat.FLAC: ['.flac'],
+            MediaFormat.OGG: ['.ogg'],
+            MediaFormat.WMA: ['.wma'],
+        }
+
+    def get_media_info(self, file_path: str) -> MediaFileInfo:
+        """
+        获取媒体文件信息
+
+        Args:
+            file_path: 媒体文件路径
+
+        Returns:
+            MediaFileInfo: 媒体文件信息
+        """
+        try:
+            path = Path(file_path)
+
+            if not path.exists():
+                raise FileNotFoundError(f"文件不存在: {file_path}")
+
+            if not path.is_file():
+                raise ValueError(f"路径不是文件: {file_path}")
+
+            # 获取文件信息
+            file_name = path.name
+            file_size = path.stat().st_size
+            file_ext = path.suffix.lower()
+
+            # 检测媒体格式
+            format_type = self._detect_format(file_ext)
+
+            # 获取媒体时长
+            duration = self._get_media_duration(file_path)
+
+            return MediaFileInfo(
+                file_path=str(path.absolute()),
+                file_name=file_name,
+                file_size=file_size,
+                duration=duration,
+                format=format_type
+            )
+
+        except Exception as e:
+            logger.error(f"获取媒体信息失败: {e}")
+            raise Exception(f"获取媒体信息失败: {str(e)}")
+
+    def get_video_info(self, file_path: str) -> MediaFileInfo:
+        """兼容旧方法名。"""
+        return self.get_media_info(file_path)
+
+    def _detect_format(self, file_ext: str) -> MediaFormat:
+        """检测媒体格式"""
+        for format_type, extensions in self.supported_formats.items():
+            if file_ext in extensions:
+                return format_type
+        # 默认返回扩展名作为格式
+        return MediaFormat(file_ext.lstrip('.'))
+
+    def _get_media_duration(self, file_path: str) -> Optional[float]:
+        """获取媒体时长"""
+        try:
+            ffmpeg = get_ffmpeg_path() or "ffmpeg"
+            result = subprocess.run(
+                [ffmpeg, "-i", file_path, "-f", "null", "-"],
+                capture_output=True, timeout=30
+            )
+            # 从 stderr 中解析时长，格式: Duration: HH:MM:SS.ms
+            output = result.stderr.decode("utf-8", errors="replace")
+            import re
+            match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", output)
+            if match:
+                h, m, s = float(match.group(1)), float(match.group(2)), float(match.group(3))
+                return h * 3600 + m * 60 + s
+            return None
+        except Exception as e:
+            logger.warning(f"无法获取媒体时长: {e}")
+            return None
+
+    def _get_video_duration(self, file_path: str) -> Optional[float]:
+        """兼容旧方法名。"""
+        return self._get_media_duration(file_path)
+
+    async def extract_audio(
+        self,
+        media_path: Optional[str] = None,
+        video_path: Optional[str] = None,
+        output_format: str = "wav",
+        progress_callback: Optional[Callable[[float], None]] = None
+    ) -> str:
+        """
+        从媒体文件中提取音频
+
+        Args:
+            media_path: 媒体文件路径
+            output_format: 输出音频格式 (wav, mp3, m4a)
+            progress_callback: 进度回调函数
+
+        Returns:
+            str: 提取的音频文件路径
+        """
+        try:
+            input_path = media_path or video_path
+            if not input_path:
+                raise Exception("未提供媒体文件路径")
+
+            logger.info(f"开始提取音频: {input_path}")
+
+            if not os.path.exists(input_path):
+                raise Exception(f"媒体文件不存在: {input_path}")
+
+            if progress_callback:
+                progress_callback(10)
+
+            # 生成音频文件路径
+            media_name = Path(input_path).stem
+            audio_path = self.temp_dir / f"{media_name}_extracted.{output_format}"
+
+            ffmpeg = get_ffmpeg_path() or "ffmpeg"
+
+            if progress_callback:
+                progress_callback(30)
+
+            # 直接用 ffmpeg 提取音频（不依赖 pydub/ffprobe）
+            if output_format.lower() == "wav":
+                cmd = [
+                    ffmpeg, "-y", "-i", input_path,
+                    "-vn",                   # 不要视频
+                    "-acodec", "pcm_s16le",  # 16-bit PCM
+                    "-ar", "16000",          # 16kHz 采样率
+                    "-ac", "1",              # 单声道
+                    str(audio_path)
+                ]
+            elif output_format.lower() == "mp3":
+                cmd = [
+                    ffmpeg, "-y", "-i", input_path,
+                    "-vn",
+                    "-acodec", "libmp3lame",
+                    "-ar", "44100",
+                    "-b:a", "192k",
+                    str(audio_path)
+                ]
+            else:
+                cmd = [
+                    ffmpeg, "-y", "-i", input_path,
+                    "-vn",
+                    str(audio_path)
+                ]
+
+            if progress_callback:
+                progress_callback(50)
+
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=600
+            )
+
+            if result.returncode != 0:
+                stderr_text = result.stderr.decode("utf-8", errors="replace")[-500:]
+                raise Exception(f"ffmpeg 返回错误: {stderr_text}")
+
+            if progress_callback:
+                progress_callback(100)
+
+            logger.info(f"音频提取完成: {audio_path}")
+            return str(audio_path)
+
+        except Exception as e:
+            logger.error(f"音频提取失败: {e}")
+            raise Exception(f"音频提取失败: {str(e)}")
+
+    async def optimize_audio_for_transcription(
+        self,
+        audio_path: str,
+        progress_callback: Optional[Callable[[float], None]] = None
+    ) -> str:
+        """
+        优化音频文件以提高转录准确率
+
+        Args:
+            audio_path: 原始音频文件路径
+            progress_callback: 进度回调函数
+
+        Returns:
+            str: 优化后的音频文件路径
+        """
+        try:
+            logger.info(f"开始优化音频: {audio_path}")
+
+            if not os.path.exists(audio_path):
+                raise Exception(f"音频文件不存在: {audio_path}")
+
+            if progress_callback:
+                progress_callback(20)
+
+            # 加载音频
+            audio = AudioSegment.from_file(audio_path)
+
+            if progress_callback:
+                progress_callback(40)
+
+            # 音频优化处理
+            # 1. 转换为16kHz单声道 (语音识别最佳格式)
+            audio = audio.set_frame_rate(16000).set_channels(1)
+
+            # 2. 音量标准化
+            try:
+                target_dBFS = -20.0
+                change_in_dBFS = target_dBFS - audio.dBFS
+                audio = audio.apply_gain(change_in_dBFS)
+            except Exception as e:
+                logger.warning(f"音量标准化失败: {e}")
+
+            if progress_callback:
+                progress_callback(80)
+
+            # 生成优化后的文件路径
+            audio_name = Path(audio_path).stem
+            optimized_path = self.temp_dir / f"{audio_name}_optimized.wav"
+
+            # 导出优化后的音频
+            audio.export(str(optimized_path), format="wav")
+
+            if progress_callback:
+                progress_callback(100)
+
+            logger.info(f"音频优化完成: {optimized_path}")
+            return str(optimized_path)
+
+        except Exception as e:
+            logger.error(f"音频优化失败: {e}")
+            raise Exception(f"音频优化失败: {str(e)}")
+
+    def detect_silence_ranges(
+        self,
+        audio_path: str,
+        min_silence_len: int = 300,
+        silence_thresh: int = -40,
+        seek_step: int = 10,
+    ) -> list:
+        """
+        检测音频中的静音区间，返回静音段的起止时间列表（秒）。
+
+        Args:
+            audio_path: 音频文件路径
+            min_silence_len: 最小静音长度（毫秒）
+            silence_thresh: 静音阈值（dB）
+            seek_step: 检测步长（毫秒）
+
+        Returns:
+            List[Tuple[float, float]]: 静音区间列表，如 [(0.5, 1.2), (5.3, 6.1), ...]
+        """
+        try:
+            from pydub.silence import detect_nonsilent
+
+            audio = AudioSegment.from_file(audio_path)
+            total_ms = len(audio)
+
+            # detect_nonsilent 返回语音区间 [(start_ms, end_ms), ...]
+            speech_ranges = detect_nonsilent(
+                audio,
+                min_silence_len=min_silence_len,
+                silence_thresh=silence_thresh,
+                seek_step=seek_step,
+            )
+
+            if not speech_ranges:
+                # 全静音或全语音
+                if total_ms > min_silence_len:
+                    return [(0.0, total_ms / 1000.0)]
+                return []
+
+            # 反转：从语音区间推导静音区间
+            silence_ranges = []
+            prev_end = 0
+
+            for speech_start, speech_end in speech_ranges:
+                if speech_start - prev_end >= min_silence_len:
+                    silence_ranges.append((prev_end / 1000.0, speech_start / 1000.0))
+                prev_end = speech_end
+
+            # 结尾静音
+            if total_ms - prev_end >= min_silence_len:
+                silence_ranges.append((prev_end / 1000.0, total_ms / 1000.0))
+
+            return silence_ranges
+
+        except ImportError:
+            logger.warning("pydub.silence 不可用，跳过静音检测")
+            return []
+        except Exception as e:
+            logger.warning(f"静音检测失败: {e}")
+            return []
+
+    def _remove_silence(self, audio: AudioSegment, silence_thresh: int = -40) -> AudioSegment:
+        """去除音频中的静音片段"""
+        try:
+            from pydub.silence import split_on_silence
+
+            # 分割静音片段
+            chunks = split_on_silence(
+                audio,
+                min_silence_len=1000,  # 最小静音长度1秒
+                silence_thresh=silence_thresh,  # 静音阈值
+                keep_silence=500  # 保留500ms静音
+            )
+
+            if chunks:
+                # 重新组合非静音片段
+                result = AudioSegment.empty()
+                for chunk in chunks:
+                    result += chunk
+                return result
+            else:
+                return audio
+
+        except ImportError:
+            # 如果没有pydub.silence，返回原音频
+            logger.warning("pydub.silence不可用，跳过静音移除")
+            return audio
+        except Exception as e:
+            logger.warning(f"静音移除失败: {e}")
+            return audio
+
+    async def extract_and_optimize(
+        self,
+        media_path: Optional[str] = None,
+        video_path: Optional[str] = None,
+        optimize: bool = True,
+        progress_callback: Optional[Callable[[float], None]] = None
+    ) -> str:
+        """
+        提取音频并优化
+
+        Args:
+            media_path: 媒体文件路径
+            optimize: 是否优化音频
+            progress_callback: 进度回调
+
+        Returns:
+            str: 音频文件路径
+        """
+        try:
+            input_path = media_path or video_path
+            if not input_path:
+                raise Exception("未提供媒体文件路径")
+
+            # 提取音频
+            audio_path = await self.extract_audio(
+                media_path=input_path,
+                output_format="wav",
+                progress_callback=lambda p: progress_callback(p * 0.5) if progress_callback else None
+            )
+
+            # 优化音频
+            if optimize:
+                optimized_path = await self.optimize_audio_for_transcription(
+                    audio_path=audio_path,
+                    progress_callback=lambda p: progress_callback(50 + p * 0.5) if progress_callback else None
+                )
+
+                # 清理原音频文件
+                try:
+                    if audio_path != optimized_path:
+                        os.remove(audio_path)
+                except Exception:
+                    pass
+
+                return optimized_path
+
+            return audio_path
+
+        except Exception as e:
+            logger.error(f"音频提取和优化失败: {e}")
+            raise
+
+    def cleanup_files(self, older_than_seconds: Optional[int] = None) -> int:
+        """
+        清理临时文件
+
+        Args:
+            older_than_seconds: 清理早于指定秒数的文件，None则使用默认值
+
+        Returns:
+            int: 清理的文件数量
+        """
+        try:
+            if older_than_seconds is None:
+                older_than_seconds = self.cleanup_after
+
+            import time
+            current_time = time.time()
+            cleaned_count = 0
+
+            for file_path in self.temp_dir.iterdir():
+                if file_path.is_file():
+                    file_age = current_time - file_path.stat().st_mtime
+                    if file_age > older_than_seconds:
+                        try:
+                            file_path.unlink()
+                            cleaned_count += 1
+                            logger.debug(f"清理文件: {file_path}")
+                        except Exception as e:
+                            logger.warning(f"清理文件失败: {file_path}, {e}")
+
+            if cleaned_count > 0:
+                logger.info(f"清理了 {cleaned_count} 个临时文件")
+
+            return cleaned_count
+
+        except Exception as e:
+            logger.error(f"文件清理失败: {e}")
+            return 0
+
+    def get_temp_dir_size(self) -> int:
+        """获取临时目录大小(字节)"""
+        try:
+            total_size = 0
+            for file_path in self.temp_dir.rglob('*'):
+                if file_path.is_file():
+                    total_size += file_path.stat().st_size
+            return total_size
+        except Exception:
+            return 0
+
+
+# 全局提取器实例
+audio_extractor = AudioExtractor()
+
+
+async def extract_audio_from_media(
+    media_path: str,
+    optimize: bool = True,
+    progress_callback: Optional[Callable[[float], None]] = None
+) -> str:
+    """
+    从媒体文件提取音频的便捷函数
+
+    Args:
+        media_path: 媒体文件路径
+        optimize: 是否优化音频
+        progress_callback: 进度回调
+
+    Returns:
+        str: 音频文件路径
+    """
+    return await audio_extractor.extract_and_optimize(
+        media_path=media_path,
+        optimize=optimize,
+        progress_callback=progress_callback
+    )
+
+
+async def extract_audio_from_video(
+    video_path: str,
+    optimize: bool = True,
+    progress_callback: Optional[Callable[[float], None]] = None
+) -> str:
+    """兼容旧函数名。"""
+    return await extract_audio_from_media(
+        media_path=video_path,
+        optimize=optimize,
+        progress_callback=progress_callback
+    )
+
+
+if __name__ == "__main__":
+    # 测试代码
+    import asyncio
+
+    async def test():
+        extractor = AudioExtractor()
+
+        try:
+            print("测试提取器初始化...")
+            print(f"临时目录: {extractor.temp_dir}")
+            print(f"目录大小: {extractor.get_temp_dir_size()} 字节")
+
+            # 测试清理
+            cleaned = extractor.cleanup_files(0)  # 清理所有文件
+            print(f"清理文件数: {cleaned}")
+
+        except Exception as e:
+            print(f"测试失败: {e}")
+
+    # asyncio.run(test())

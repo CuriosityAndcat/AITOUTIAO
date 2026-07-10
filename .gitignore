@@ -42,6 +42,7 @@ Thumbs.db
 *.log
 _st_stdout.log
 _st_stderr.log
+log/
 
 # Temp
 .temp/
@@ -57,6 +58,18 @@ CLAUDE.md
 *.pt
 *.pth
 *.ckpt
+*.onnx
+models/
+models_cache/
+
+# Media files
+*.wav
+*.mp3
+*.flac
+*.mp4
+*.avi
+*.mkv
+*.webm
 
 # Screenshots
 screenshot.png

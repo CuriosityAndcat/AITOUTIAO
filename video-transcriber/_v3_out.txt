@@ -1,0 +1,7 @@
+=== SenseVoice 转录测试 ===
+缓存检查: C:\Users\LHQ/.cache/modelscope/hub/models/iic/SenseVoiceSmall
+model.pt: True
+
+[1/2] 加载模型...
+funasr version: 1.3.10.
+Downloading Model from https://www.modelscope.cn to directory: C:\Users\LHQ\.cache\modelscope\hub\models\iic\SenseVoiceSmall

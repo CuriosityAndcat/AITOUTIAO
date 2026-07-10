@@ -1,3 +1,11 @@
+<!--
+  定位说明：本文档是项目 Python Agent 系统（agent/ 目录）的架构设计文档和行为规约，
+  定义的是自定义 Agent 系统的内部行为规则（Pydantic 模型、LangGraph 工作流等），
+  而非 CodeBuddy AI 编码助手的约束规则。
+
+  CodeBuddy AI 的行为约束请参见：.codebuddy/rules/ 和 .codebuddy/settings.json
+-->
+
 # Agent Workflow 行为规约 v1.0
 
 > **规约性质**：本文档定义 AI Agent 在代码编辑、内容生成、系统操作等任务中的**强制行为规则**。

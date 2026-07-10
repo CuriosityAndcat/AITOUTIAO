@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(rm -rf /*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./.git/config)",
+      "Edit(./.git/config)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(shutdown:*)",
+      "Bash(reboot:*)",
+      "Bash(diskpart:*)",
+      "Bash(format:*)",
+      "Bash(chmod 777:*)",
+      "Bash(> /dev/sda*)",
+      "Bash(:(){ :|:& };:)"
+    ],
+    "allow": [
+      "Bash(npm:*)",
+      "Bash(pip:*)",
+      "Bash(python:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(dir:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(type:*)",
+      "Bash(echo:*)",
+      "Bash(mkdir:*)",
+      "Bash(where:*)",
+      "Bash(whoami:*)",
+      "Edit(~/**)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git merge:*)",
+      "Bash(git rebase:*)",
+      "Bash(del:*)",
+      "Bash(rm:*)",
+      "Bash(move:*)",
+      "Bash(ren:*)",
+      "Bash(copy:*)",
+      "Bash(xcopy:*)"
+    ]
+  },
+  "defaultMode": "default"
+}

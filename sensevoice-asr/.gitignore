@@ -1,0 +1,32 @@
+# SenseVoice 模型文件（893MB，需单独下载）
+models/
+*.pt
+*.onnx
+
+# 转录输出
+output/
+*.txt
+out.log
+stdout.log
+stderr.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 压缩包
+*.zip
+*.tar.gz
+*.7z
+
+# IDE
+.vscode/
+.idea/
+
+# 环境
+venv/
+.env
