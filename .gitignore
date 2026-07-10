@@ -49,8 +49,11 @@ log/
 *.tmp
 *~
 
-# Claude
-CLAUDE.md
+# Reference projects (not part of this repo)
+references/
+
+# Separated engine project (now at AIToutiao-Engine)
+engine_mode/
 
 # Large models
 *.bin
